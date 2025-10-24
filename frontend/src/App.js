@@ -10,7 +10,7 @@ function App() {
   const [scheduleData, setScheduleData] = useState(null);
 
   return (
-    <Router>
+    <Router basename="/college-scrap">
       <div className="app-container">
         <Routes>
           <Route
