@@ -1,125 +1,122 @@
 """
-API Routes for CollegeScrap
+API Routes for Cheap Stop
 """
 from flask import Blueprint, jsonify, request
-from app.models.database import get_session, Major, Minor, Course
-from app.utils.degree_analyzer import DegreeAnalyzer
-from app.utils.scheduler import ScheduleGenerator
+import os
+from app.scrapers.product_scraper import scrape_products
+from app.utils.route_optimizer import calculate_optimal_route
+from app.utils.gemini_search import enhance_search_query, match_products
+import google.generativeai as genai
 
 api = Blueprint('api', __name__)
+
+# Configure Gemini API
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 
 @api.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
-    return jsonify({'status': 'ok', 'message': 'CollegeScrap API is running'})
+    return jsonify({'status': 'healthy'}), 200
 
-@api.route('/majors', methods=['GET'])
-def get_majors():
-    """Get all available majors"""
-    session = get_session()
-    try:
-        majors = session.query(Major).all()
-        return jsonify([{
-            'id': m.id,
-            'name': m.name,
-            'degree_type': m.degree_type
-        } for m in majors])
-    finally:
-        session.close()
 
-@api.route('/minors', methods=['GET'])
-def get_minors():
-    """Get all available minors"""
-    session = get_session()
-    try:
-        minors = session.query(Minor).all()
-        return jsonify([{
-            'id': m.id,
-            'name': m.name,
-            'required_credits': m.required_credits
-        } for m in minors])
-    finally:
-        session.close()
-
-@api.route('/degree-requirements', methods=['POST'])
-def get_degree_requirements():
+@api.route('/search-products', methods=['POST'])
+def search_products():
     """
-    Analyze degree requirements
-    POST body: {
-        "major_id": int,
-        "minor_id": int (optional),
-        "classification": str
-    }
+    Search for products across multiple retailers
     """
-    data = request.get_json()
-    major_id = data.get('major_id')
-    minor_id = data.get('minor_id')
-    classification = data.get('classification', 'Freshman')
-
-    session = get_session()
     try:
-        major = session.query(Major).filter_by(id=major_id).first()
-        if not major:
-            return jsonify({'error': 'Major not found'}), 404
+        data = request.json
+        query = data.get('query', '')
+        budget = data.get('budget')
+        user_location = data.get('location')
 
-        minor = None
-        if minor_id:
-            minor = session.query(Minor).filter_by(id=minor_id).first()
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
 
-        analyzer = DegreeAnalyzer(session)
-        requirements = analyzer.analyze_requirements(major, minor, classification)
+        # Split query into individual items
+        items = [item.strip() for item in query.split(',')]
 
-        return jsonify(requirements)
-    finally:
-        session.close()
+        # Use Gemini to enhance search queries
+        enhanced_queries = []
+        for item in items:
+            try:
+                enhanced = enhance_search_query(item)
+                enhanced_queries.append(enhanced)
+            except Exception as e:
+                print(f"Error enhancing query with Gemini: {e}")
+                enhanced_queries.append(item)
 
-@api.route('/generate-schedule', methods=['POST'])
-def generate_schedule():
+        # Scrape products from retailers
+        all_products = []
+        for idx, item in enumerate(items):
+            query_to_use = enhanced_queries[idx] if idx < len(enhanced_queries) else item
+            products = scrape_products(query_to_use, user_location)
+            all_products.extend(products)
+
+        # Filter by budget if provided
+        if budget:
+            # Group products by item
+            items_dict = {}
+            for product in all_products:
+                item_key = product.get('search_query', 'unknown')
+                if item_key not in items_dict:
+                    items_dict[item_key] = []
+                items_dict[item_key].append(product)
+
+            # For each item, only include products that fit within budget
+            filtered_products = []
+            for item_key, products in items_dict.items():
+                affordable = [p for p in products if p['price'] <= budget]
+                if affordable:
+                    # Sort by price and take cheapest options
+                    affordable.sort(key=lambda x: x['price'])
+                    filtered_products.extend(affordable[:5])  # Top 5 cheapest per item
+                else:
+                    # If nothing is affordable, include cheapest option anyway
+                    products.sort(key=lambda x: x['price'])
+                    if products:
+                        filtered_products.append(products[0])
+
+            all_products = filtered_products
+
+        # Use Gemini to match and rank products
+        try:
+            matched_products = match_products(items, all_products)
+            return jsonify({'products': matched_products}), 200
+        except Exception as e:
+            print(f"Error matching products with Gemini: {e}")
+            # Fall back to returning all products
+            return jsonify({'products': all_products}), 200
+
+    except Exception as e:
+        print(f"Search error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@api.route('/calculate-route', methods=['POST'])
+def calculate_route():
     """
-    Generate a balanced semester schedule
-    POST body: {
-        "major_id": int,
-        "minor_id": int (optional),
-        "semester": str (e.g., "Fall 2025"),
-        "credit_load": str ("light", "standard", "heavy"),
-        "completed_courses": [course_codes]
-    }
+    Calculate optimal route using A* algorithm
     """
-    data = request.get_json()
-    major_id = data.get('major_id')
-    minor_id = data.get('minor_id')
-    semester = data.get('semester')
-    credit_load = data.get('credit_load', 'standard')
-    completed_courses = data.get('completed_courses', [])
-
-    session = get_session()
     try:
-        major = session.query(Major).filter_by(id=major_id).first()
-        if not major:
-            return jsonify({'error': 'Major not found'}), 404
+        data = request.json
+        products = data.get('products', [])
+        user_location = data.get('userLocation')
 
-        minor = None
-        if minor_id:
-            minor = session.query(Minor).filter_by(id=minor_id).first()
+        if not products:
+            return jsonify({'error': 'Products are required'}), 400
 
-        scheduler = ScheduleGenerator(session)
-        schedule = scheduler.generate_schedule(
-            major, minor, semester, credit_load, completed_courses
-        )
+        if not user_location:
+            return jsonify({'error': 'User location is required'}), 400
 
-        return jsonify(schedule)
-    finally:
-        session.close()
+        # Calculate optimal route
+        optimized_route = calculate_optimal_route(products, user_location)
 
-@api.route('/courses/<course_code>', methods=['GET'])
-def get_course(course_code):
-    """Get details for a specific course"""
-    session = get_session()
-    try:
-        course = session.query(Course).filter_by(code=course_code).first()
-        if not course:
-            return jsonify({'error': 'Course not found'}), 404
+        return jsonify({'optimizedRoute': optimized_route}), 200
 
-        return jsonify(course.to_dict())
-    finally:
-        session.close()
+    except Exception as e:
+        print(f"Route calculation error: {e}")
+        return jsonify({'error': str(e)}), 500

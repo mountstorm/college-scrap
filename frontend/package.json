@@ -1,13 +1,14 @@
 {
-  "name": "collegescrap-frontend",
-  "version": "0.1.0",
+  "name": "cheap-stop",
+  "version": "1.0.0",
   "private": true,
   "homepage": "https://mountstorm.github.io/college-scrap",
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.20.0",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "@react-google-maps/api": "^2.19.2"
   },
   "scripts": {
     "start": "react-scripts start",
